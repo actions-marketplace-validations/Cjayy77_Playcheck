@@ -9,7 +9,7 @@
 Readable previews for `ansible-playbook --check --diff`.
   
 Ansible's check mode tells you what a playbook *would* change — but the raw
-output is an unstructured scroll, and tasks that can't be simulated  
+output is an unstructured scroll, and tasks that can't be simulated   
 (`shell`, `command`, `raw`, …) are silently skipped with the same
 `skipping:` line as an ordinary conditional skip. People read "no diff shown"
 as "no change", and that's false.
