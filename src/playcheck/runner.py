@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -73,14 +74,53 @@ def run(
             "Is Ansible installed in this environment?"
         )
 
+    # ansible-playbook can write a surprising amount to stderr (deprecation
+    # warnings, connection-plugin chatter, vault prompts on misconfiguration)
+    # — easily enough to fill the OS pipe buffer (commonly 64KB). If we only
+    # read stdout in this thread and leave stderr to `communicate()`
+    # afterward, a full stderr pipe blocks the child on write() while we
+    # block on read() of stdout: a classic subprocess deadlock. Drain stderr
+    # concurrently on a background thread instead.
+    stderr_chunks: List[str] = []
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        for chunk in proc.stderr:
+            stderr_chunks.append(chunk)
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     lines: List[str] = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        lines.append(line)
-        if progress:
-            _echo_progress(line)
-    _, stderr = proc.communicate()
-    return RunOutcome(returncode=proc.returncode, stdout_lines=lines, stderr=stderr or "")
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            if progress:
+                _echo_progress(line)
+    except KeyboardInterrupt:
+        # Ctrl-C during the child's run: make sure we don't leave an
+        # orphaned ansible-playbook process, and don't hang forever
+        # waiting for it to exit on its own.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise
+    finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.poll() is None:
+            returncode = proc.wait()
+        else:
+            returncode = proc.returncode
+        stderr_thread.join()
+
+    return RunOutcome(
+        returncode=returncode, stdout_lines=lines, stderr="".join(stderr_chunks)
+    )
 
 
 def _echo_progress(line: str) -> None:
